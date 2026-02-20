@@ -87,6 +87,10 @@ impl Quirk {
         Self::device(sku, DeviceType::Thermometer, "mdi:thermometer")
     }
 
+    pub fn fan<SKU: Into<Cow<'static, str>>>(sku: SKU) -> Self {
+        Self::device(sku, DeviceType::Fan, "mdi:fan")
+    }
+
     pub fn with_rgb(mut self) -> Self {
         self.supports_rgb = true;
         self
@@ -231,6 +235,9 @@ fn load_quirks() -> HashMap<String, Quirk> {
             .with_iot_api_support(true)
             .with_rgb()
             .with_brightness(),
+        // Tower fan - only available via IoT API
+        Quirk::fan("H7105")
+            .with_iot_api_support(true),
         Quirk::space_heater("H7130")
             .with_platform_temperature_sensor_units(TemperatureUnits::Fahrenheit),
         Quirk::space_heater("H7131")

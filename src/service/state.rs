@@ -365,6 +365,21 @@ impl State {
                 if let Some(info) = &device.undoc_device_info {
                     log::info!("Using IoT API to set {device} power state");
                     iot.set_power_state(&info.entry, on).await?;
+
+                    // Fans don't send IoT status responses to turn commands,
+                    // so notify HA optimistically with the new state.
+                    if device.device_type() == DeviceType::Fan {
+                        {
+                            let mut dev =
+                                self.device_mut(&device.sku, &device.id).await;
+                            let mut status =
+                                dev.iot_device_status.clone().unwrap_or_default();
+                            status.on = on;
+                            dev.set_iot_device_status(status);
+                        }
+                        self.notify_of_state_change(&device.id).await?;
+                    }
+
                     return Ok(());
                 }
             }
@@ -514,6 +529,108 @@ impl State {
             }
         }
         anyhow::bail!("Unable to control humidifier parameter work_mode={work_mode} for {device}");
+    }
+
+    pub async fn fan_set_speed(
+        self: &Arc<Self>,
+        device: &Device,
+        percent: i64,
+    ) -> anyhow::Result<()> {
+        // Try Platform API first (if device has fan capability)
+        if let Some(client) = self.get_platform_client().await {
+            if let Some(info) = &device.http_device_info {
+                if let Some(cap) = info.capability_by_instance("fan") {
+                    log::info!("Using Platform API to set {device} fan speed to {percent}%");
+                    client.control_device(info, cap, percent).await?;
+                    return Ok(());
+                }
+                if let Some(cap) = info.capability_by_instance("workMode") {
+                    let value = serde_json::json!({
+                        "workMode": 1,
+                        "modeValue": percent
+                    });
+                    log::info!("Using Platform API workMode to set {device} fan speed to {percent}");
+                    client.control_device(info, cap, value).await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // IoT API for BLE-only fans like H7105.
+        // The write opcode is 0x33 (BLE GATT write), not 0xAA (BLE notification).
+        // Format: [0x33, 0x05, 0x01, SPEED, 0x00 × 15, XOR_CHECKSUM]
+        // where XOR_CHECKSUM = 0x33 ^ 0x05 ^ 0x01 ^ SPEED = 0x37 ^ SPEED.
+        // Sent via ptReal. Discovered from homebridge-govee source (bwp91).
+        if let Some(iot) = self.get_iot_client().await {
+            if let Some(info) = &device.undoc_device_info {
+                let speed = percent.clamp(1, 12) as u8;
+                log::info!("Using IoT ptReal to set {device} fan speed to {speed}");
+                // BLE write format: [0x33, cmd=0x05, slot=0x01, speed]
+                // finish() zero-pads to 19 bytes and appends XOR checksum.
+                let b64 = crate::ble::Base64HexBytes::with_bytes(vec![
+                    0x33, 0x05, 0x01, speed,
+                ])
+                .base64();
+                iot.send_real(&info.entry, b64).await?;
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("Unable to control fan speed for {device}");
+    }
+
+    pub async fn fan_set_oscillate(
+        self: &Arc<Self>,
+        device: &Device,
+        on: bool,
+    ) -> anyhow::Result<()> {
+        // Try Platform API first (if device has oscillation toggle)
+        if let Some(client) = self.get_platform_client().await {
+            if let Some(info) = &device.http_device_info {
+                if info.capability_by_instance("oscillationToggle").is_some() {
+                    log::info!("Using Platform API to set {device} oscillation to {on}");
+                    client.set_toggle_state(info, "oscillationToggle", on).await?;
+                    self.device_mut(&device.sku, &device.id)
+                        .await
+                        .fan_oscillate = Some(on);
+                    return Ok(());
+                }
+            }
+        }
+
+        // IoT API for BLE-only fans like H7105.
+        // H7105 uses multiSync with opcode 0x3A (not ptReal with 0x33).
+        // Write format: [0x3A, 0x1D, on/off, param0, param1, param2, param3, 0x01]
+        // where params are bytes 3-6 from the cached AA 1D status packet.
+        // Byte 7 (0x01) mirrors the constant flag seen at position [7] in
+        // all observed AA 1D status packets regardless of oscillation state.
+        // Discovered from homebridge-govee (bwp91) fan-H7105.js internalSwingUpdate.
+        if let Some(iot) = self.get_iot_client().await {
+            if let Some(info) = &device.undoc_device_info {
+                let osc = if on { 1u8 } else { 0u8 };
+                let params = device
+                    .fan_oscillate_params
+                    .unwrap_or([0x03, 0x3C, 0x05, 0x46]);
+                log::info!(
+                    "Using IoT multiSync to set {device} oscillation to {on} (params={params:02X?})"
+                );
+                let packet = Base64HexBytes::with_bytes(vec![
+                    0x3A, 0x1D, osc, params[0], params[1], params[2], params[3], 0x01,
+                ])
+                .base64();
+                iot.send_multi_sync(&info.entry, packet).await?;
+                self.device_mut(&device.sku, &device.id)
+                    .await
+                    .fan_oscillate = Some(on);
+                // The device doesn't always send AA 1D back for OFF commands,
+                // so push the state to HA immediately rather than waiting for
+                // the device echo to trigger notify_of_state_change.
+                self.notify_of_state_change(&device.id).await?;
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("Unable to control fan oscillation for {device}");
     }
 
     pub async fn device_set_color_rgb(

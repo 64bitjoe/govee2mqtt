@@ -1,6 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::button::ButtonConfig;
 use crate::hass_mqtt::climate::TargetTemperatureEntity;
+use crate::hass_mqtt::fan::Fan;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::light::DeviceLight;
@@ -167,6 +168,10 @@ pub async fn enumerate_entities_for_device<'a>(
         entities.add(Humidifier::new(&d, state).await?);
     }
 
+    if matches!(d.device_type(), DeviceType::Fan) {
+        entities.add(Fan::new(&d, state).await?);
+    }
+
     if d.device_type() != DeviceType::Light {
         if let Some(scenes) = SceneModeSelect::new(d, state).await? {
             entities.add(scenes);
@@ -188,6 +193,7 @@ pub async fn enumerate_entities_for_device<'a>(
 
                 DeviceCapabilityKind::Range if cap.instance == "brightness" => {}
                 DeviceCapabilityKind::Range if cap.instance == "humidity" => {}
+                DeviceCapabilityKind::Range if cap.instance == "fan" => {}
                 DeviceCapabilityKind::WorkMode => {
                     entities_for_work_mode(d, state, cap, entities).await?;
                 }

@@ -27,8 +27,10 @@ pub struct ServeCommand {
 async fn poll_single_device(state: &StateHandle, device: &Device) -> anyhow::Result<()> {
     let now = Utc::now();
 
-    if device.is_ble_only_device() == Some(true) {
-        // We can't poll this device, we have no ble support
+    if device.is_ble_only_device() == Some(true) && !device.iot_api_supported() {
+        // We can't poll this device: no LAN, no IoT, and no direct BLE support.
+        // Devices with iot_api_supported=true can still be polled via IoT MQTT
+        // even if they have no WiFi (e.g. H7105 tower fan).
         return Ok(());
     }
 

@@ -209,6 +209,77 @@ impl IotClient {
         Ok(())
     }
 
+    /// Send a workMode command (high-level mode/speed control, not raw BLE passthrough).
+    /// workMode + modeValue is used by some Govee IoT devices for fan speed.
+    /// NOTE: H7105 returns result=0 for this command (not supported by its firmware).
+    #[allow(dead_code)]
+    pub async fn send_work_mode(
+        &self,
+        device: &DeviceEntry,
+        work_mode: u8,
+        mode_value: u8,
+    ) -> anyhow::Result<()> {
+        log::trace!(
+            "send_work_mode for {} workMode={work_mode} modeValue={mode_value}",
+            device.device
+        );
+        let device_topic = device.device_topic()?;
+
+        self.client
+            .publish(
+                device_topic,
+                serde_json::to_string(&serde_json::json!({
+                    "msg": {
+                        "cmd": "workMode",
+                        "data": {
+                            "workMode": work_mode,
+                            "modeValue": mode_value,
+                        },
+                        "cmdVersion": 0,
+                        "transaction": format!("v_{}000", ms_timestamp()),
+                        "type": 1,
+                    }
+                }))?,
+                QoS::AtMostOnce,
+                false,
+            )
+            .await
+            .context("IotClient::send_work_mode")?;
+        Ok(())
+    }
+
+    /// Send a multiSync command with an array of BLE packets (base64-encoded).
+    /// Used by H7105 fans for oscillation control.
+    pub async fn send_multi_sync(
+        &self,
+        device: &DeviceEntry,
+        commands: Vec<String>,
+    ) -> anyhow::Result<()> {
+        log::trace!("send_multi_sync for {} to {commands:?}", device.device);
+        let device_topic = device.device_topic()?;
+
+        self.client
+            .publish(
+                device_topic,
+                serde_json::to_string(&serde_json::json!({
+                    "msg": {
+                        "cmd": "multiSync",
+                        "data": {
+                            "command": commands,
+                        },
+                        "cmdVersion": 0,
+                        "transaction": format!("v_{}000", ms_timestamp()),
+                        "type": 1,
+                    }
+                }))?,
+                QoS::AtMostOnce,
+                false,
+            )
+            .await
+            .context("IotClient::send_multi_sync")?;
+        Ok(())
+    }
+
     pub async fn activate_one_click(&self, item: &ParsedOneClick) -> anyhow::Result<()> {
         for entry in &item.entries {
             for command in &entry.msgs {
@@ -442,8 +513,38 @@ async fn run_iot_subscriber(
                                                     mode, param,
                                                 );
                                             }
-                                            GoveeBlePacket::Generic(_) => {
-                                                // Ignore packets that we can't decode
+                                            GoveeBlePacket::Generic(ref bytes) => {
+                                                let b = bytes.as_bytes();
+                                                // H7105 fan state: [AA, 05, 01, SPEED, OSC, ...]
+                                                // Byte 0=0xAA, 1=0x05, 2=0x01 (active slot), 3=speed, 4=oscillation
+                                                if b.len() >= 5
+                                                    && b[0] == 0xAA
+                                                    && b[1] == 0x05
+                                                    && b[2] == 0x01
+                                                {
+                                                    let speed = b[3];
+                                                    let osc = b[4] != 0;
+                                                    if speed > 0 {
+                                                        log::info!(
+                                                            "Fan state for {sku}: speed={speed} osc={osc}"
+                                                        );
+                                                        device.set_fan_speed(speed);
+                                                        device.fan_oscillate = Some(osc);
+                                                    }
+                                                }
+                                                // H7105 oscillation: [AA, 1D, OSC, param0, param1, param2, param3, ...]
+                                                else if b.len() >= 3 && b[0] == 0xAA && b[1] == 0x1D {
+                                                    let osc = b[2] != 0;
+                                                    log::info!(
+                                                        "Fan oscillation for {sku}: osc={osc}"
+                                                    );
+                                                    device.fan_oscillate = Some(osc);
+                                                    // Cache bytes 3-6 for use in the write command
+                                                    if b.len() >= 7 {
+                                                        device.fan_oscillate_params =
+                                                            Some([b[3], b[4], b[5], b[6]]);
+                                                    }
+                                                }
                                             }
                                             GoveeBlePacket::SetHumidifierMode(_)
                                             | GoveeBlePacket::SetHumidifierNightlight(_) => {
@@ -458,6 +559,53 @@ async fn run_iot_subscriber(
                                                 );
                                             }
                                         }
+                                    }
+
+                                    // Cache the full op.command for fan speed replay,
+                                    // but ONLY from "status" responses (full 21-packet state
+                                    // dumps). multiSync echoes are partial and corrupt the cache.
+                                    let is_status_response =
+                                        packet.cmd.as_deref() == Some("status");
+                                    let has_work_mode_slots = is_status_response
+                                        && op.command.iter().any(|c| {
+                                            if let GoveeBlePacket::Generic(ref b) =
+                                                c.decode_for_sku(sku)
+                                            {
+                                                let b = b.as_bytes();
+                                                b.len() >= 2 && b[0] == 0xAA && b[1] == 0x05
+                                            } else {
+                                                false
+                                            }
+                                        });
+                                    log::info!(
+                                        "IoT op cache check for {sku}: cmd={:?} has_work_mode_slots={has_work_mode_slots} cmd_count={}",
+                                        packet.cmd,
+                                        op.command.len()
+                                    );
+                                    if has_work_mode_slots {
+                                        // Log all packet bytes to identify all available opcodes
+                                        for (idx, c) in op.command.iter().enumerate() {
+                                            if let GoveeBlePacket::Generic(ref hb) =
+                                                c.decode_for_sku(sku)
+                                            {
+                                                let b = hb.as_bytes();
+                                                log::info!(
+                                                    "Full status slot[{idx}] opcode={:02X?} bytes={:02X?}",
+                                                    &b[..b.len().min(3)],
+                                                    b
+                                                );
+                                            }
+                                        }
+                                        let all_b64: Vec<String> = op
+                                            .command
+                                            .iter()
+                                            .flat_map(|c: &Base64HexBytes| c.base64())
+                                            .collect();
+                                        device.fan_iot_op_commands = all_b64;
+                                        log::info!(
+                                            "Cached {} IoT op slots for {sku}",
+                                            device.fan_iot_op_commands.len()
+                                        );
                                     }
                                 }
 

@@ -11,6 +11,12 @@ static MGR: Lazy<PacketManager> = Lazy::new(PacketManager::new);
 #[derive(Clone, PartialEq, Eq)]
 pub struct HexBytes(Vec<u8>);
 
+impl HexBytes {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl std::fmt::Debug for HexBytes {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         fmt.write_fmt(format_args!("{:02X?}", self.0))

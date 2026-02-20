@@ -41,6 +41,15 @@ pub struct Device {
     pub humidifier_work_mode: Option<u8>,
     pub humidifier_param_by_mode: HashMap<u8, u8>,
 
+    pub target_fan_speed: Option<u8>,
+    pub fan_oscillate: Option<bool>,
+    /// Bytes 3-6 from the AA 1D oscillation status packet.
+    /// Used by H7105 fans in the multiSync oscillation write command.
+    pub fan_oscillate_params: Option<[u8; 4]>,
+    /// Cached IoT op.command base64 strings from the last status response.
+    /// Used by H7105 fans to replay the full slot state when changing speed.
+    pub fan_iot_op_commands: Vec<String>,
+
     pub last_polled: Option<DateTime<Utc>>,
 
     active_scene: Option<ActiveSceneInfo>,
@@ -188,6 +197,10 @@ impl Device {
     pub fn set_humidifier_work_mode_and_param(&mut self, mode: u8, param: u8) {
         self.humidifier_work_mode.replace(mode);
         self.humidifier_param_by_mode.insert(mode, param);
+    }
+
+    pub fn set_fan_speed(&mut self, speed: u8) {
+        self.target_fan_speed.replace(speed);
     }
 
     /// Update the LAN device information
@@ -426,6 +439,9 @@ impl Device {
             (DeviceType::Humidifier, _) => true,
             (DeviceType::Light, _) => false,
             (DeviceType::Kettle, _) => true,
+            // Fans with IoT support (e.g. H7105) are polled via IoT MQTT,
+            // not the Platform API (which may not list them).
+            (DeviceType::Fan, _) => false,
             _ => true,
         }
     }
@@ -442,6 +458,7 @@ impl Device {
         match (device_type, self.sku.as_str()) {
             (_, "H7160") => true,
             (DeviceType::Light, _) => true,
+            (DeviceType::Fan, _) => true,
             _ => false,
         }
     }
