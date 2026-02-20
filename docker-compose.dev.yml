@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  govee2mqtt:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: govee2mqtt-dev
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Host networking is required for LAN discovery
+    network_mode: host
+    volumes:
+      # Persist data between restarts
+      - govee-data:/data
+
+volumes:
+  govee-data:

@@ -21,7 +21,7 @@ on:
       - ".dockerignore"
 
 env:
-  IMAGE: ghcr.io/wez/govee2mqtt
+  IMAGE: ghcr.io/64bitjoe/govee2mqtt
 
 jobs:
   build:

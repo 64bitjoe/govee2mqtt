@@ -1,0 +1,52 @@
+FROM rust:1.83-bookworm as builder
+
+WORKDIR /build
+
+# Copy the source code
+COPY . .
+
+# Build the binary
+RUN cargo build --release
+
+####################################################################################################
+## Final image
+####################################################################################################
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "1000" \
+    "govee"
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/govee /app/govee
+COPY AmazonRootCA1.pem /app
+COPY assets /app/assets
+
+RUN mkdir -p /data && chown govee:govee /data
+
+USER govee:govee
+
+ENV \
+  RUST_BACKTRACE=full \
+  PATH=/app:$PATH \
+  XDG_CACHE_HOME=/data
+
+VOLUME /data
+
+CMD ["/app/govee", \
+  "serve", \
+  "--govee-iot-key=/data/iot.key", \
+  "--govee-iot-cert=/data/iot.cert", \
+  "--amazon-root-ca=/app/AmazonRootCA1.pem"]

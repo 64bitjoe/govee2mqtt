@@ -1,6 +1,8 @@
 target
 .*sw?
 .env
+.env.backup
+data/
 docker-target
 node_modules
 package.json
